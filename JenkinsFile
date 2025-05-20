@@ -25,10 +25,8 @@ pipeline {
         stage('Checkout Project Code') {
             steps {
                 script {
-                    // Obtener la rama objetivo (puede pasarse como parámetro o detectarse de otra forma)
                     env.TARGET_BRANCH = params.BRANCH ?: env.BRANCH_NAME ?: 'main'
                     
-                    // Hacer checkout del repositorio del proyecto
                     checkout([
                         $class: 'GitSCM',
                         branches: [[name: "*/${env.TARGET_BRANCH}"]],
@@ -39,7 +37,6 @@ pipeline {
                         ]]
                     ])
                     
-                    // Establecer la rama actual para el despliegue
                     env.ACTUAL_BRANCH = env.TARGET_BRANCH
                     echo "🔍 Rama objetivo: ${env.ACTUAL_BRANCH}"
                 }
@@ -54,6 +51,7 @@ pipeline {
                              env.ACTUAL_BRANCH == 'main' ? PROD_IP : null
 
                     def pm2_name = "${env.ACTUAL_BRANCH}-health"
+                    def env_file = ".env.${env.ACTUAL_BRANCH}"
 
                     if (ip == null) {
                         error "Branch ${env.ACTUAL_BRANCH} no está configurada para despliegue."
@@ -75,7 +73,6 @@ pipeline {
                             sudo npm install -g pm2
                         fi
                         
-                        # Instalar ts-node globalmente si no existe
                         if ! npm list -g ts-node > /dev/null 2>&1; then
                             sudo npm install -g ts-node typescript
                         fi
@@ -91,8 +88,24 @@ pipeline {
                         git reset --hard origin/${env.ACTUAL_BRANCH}
                         git clean -fd
                         
+                        echo "🔧 Configurando variables de entorno..."
+                        # Usar el archivo .env específico por rama si existe, sino usar .env.example
+                        if [ -f "$REMOTE_PATH/${env_file}" ]; then
+                            cp $REMOTE_PATH/${env_file} $REMOTE_PATH/.env
+                        else
+                            cp $REMOTE_PATH/.env.example $REMOTE_PATH/.env
+                            echo "⚠️ Usando .env.example porque no se encontró ${env_file}"
+                        fi
+                        
+                        # Asegurar permisos correctos
+                        sudo chown ubuntu:ubuntu $REMOTE_PATH/.env
+                        sudo chmod 644 $REMOTE_PATH/.env
+                        
                         echo "🚀 Instalando dependencias..."
                         npm ci
+                        
+                        echo "📦 Instalando tipos TypeScript..."
+                        npm install --save-dev @types/cors @types/express @types/bcrypt @types/jsonwebtoken @types/pg
                         
                         echo "⚙️ Compilando TypeScript..."
                         npm run build
@@ -102,7 +115,6 @@ pipeline {
                         pm2 start npm --name ${pm2_name} -- start
                         pm2 save
                         
-                        # Configurar startup solo una vez
                         if [ ! -f "/etc/systemd/system/pm2-${EC2_USER}.service" ]; then
                             pm2 startup
                         fi
@@ -118,9 +130,11 @@ pipeline {
                     sh """
                     ssh -i $SSH_KEY -o StrictHostKeyChecking=no $EC2_USER@$ip '
                         echo "🔄 Verificando estado del servicio..."
-                        sleep 5  # Esperar que el servicio inicie
+                        sleep 10  # Dar más tiempo para que la aplicación inicie
                         pm2 list
-                        curl -I http://localhost:3000/health || echo "Servicio no responde"
+                        echo "📄 Contenido del archivo .env:"
+                        cat $REMOTE_PATH/.env
+                        curl -I http://localhost:3000/health || echo "⚠️ Servicio no responde"
                     '
                     """
                 }
@@ -135,7 +149,6 @@ pipeline {
         failure {
             echo "❌ Pipeline falló"
             script {
-                // Opcional: Mostrar logs de PM2 en caso de fallo
                 def ip = env.ACTUAL_BRANCH == 'dev' ? DEV_IP :
                          env.ACTUAL_BRANCH == 'qa'  ? QA_IP :
                          env.ACTUAL_BRANCH == 'main' ? PROD_IP : null
@@ -143,8 +156,18 @@ pipeline {
                 if (ip) {
                     sh """
                     ssh -i $SSH_KEY -o StrictHostKeyChecking=no $EC2_USER@$ip '
-                        echo "📜 Mostrando logs de PM2..."
-                        pm2 logs ${env.ACTUAL_BRANCH}-health --lines 50 || echo "No se pudieron obtener logs"
+                        echo "📜 Mostrando logs de la aplicación..."
+                        pm2 logs ${env.ACTUAL_BRANCH}-health --lines 100 || echo "No se pudieron obtener logs"
+                        echo "🔍 Verificando conexión a PostgreSQL..."
+                        if ! command -v nc > /dev/null; then
+                            sudo apt-get install -y netcat
+                        fi
+                        if [ -f "$REMOTE_PATH/.env" ]; then
+                            DB_HOST=\$(grep DB_HOST $REMOTE_PATH/.env | cut -d= -f2)
+                            DB_PORT=\$(grep DB_PORT $REMOTE_PATH/.env | cut -d= -f2)
+                            echo "🔍 Probando conexión a \$DB_HOST:\$DB_PORT..."
+                            nc -zv \$DB_HOST \$DB_PORT || echo "❌ No se puede conectar a PostgreSQL"
+                        fi
                     '
                     """
                 }
