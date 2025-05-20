@@ -54,9 +54,14 @@ pipeline {
                             sudo apt-get install -y nodejs
                         fi
 
-                        echo "📥 Verificando PM2..."
+                        echo "📥 Verificando PM2 y dependencias..."
                         if ! command -v pm2 > /dev/null; then
                             sudo npm install -g pm2
+                        fi
+                        
+                        # Instalar ts-node globalmente si no existe
+                        if ! npm list -g ts-node > /dev/null 2>&1; then
+                            sudo npm install -g ts-node typescript
                         fi
 
                         echo "📁 Configurando repositorio..."
@@ -73,9 +78,11 @@ pipeline {
                         echo "🚀 Instalando dependencias..."
                         npm ci
                         
-                        echo "⚙️ Configurando aplicación..."
-                        pm2 delete ${pm2_name} || true
+                        echo "⚙️ Compilando TypeScript..."
                         npm run build
+                        
+                        echo "🚀 Iniciando aplicación..."
+                        pm2 delete ${pm2_name} || true
                         pm2 start npm --name ${pm2_name} -- start
                         pm2 save
                         
