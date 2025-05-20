@@ -12,6 +12,7 @@ pipeline {
         QA_IP  = '34.199.159.255'
         PROD_IP = '18.235.91.203'
         REMOTE_PATH = '/home/ubuntu/auth_service'
+        PROJECT_REPO = 'https://github.com/Gallegos19/auth_service.git'
     }
 
     stages {
@@ -21,11 +22,26 @@ pipeline {
             }
         }
 
-        stage('Detect Branch') {
+        stage('Checkout Project Code') {
             steps {
                 script {
-                    env.ACTUAL_BRANCH = scm.branches[0].name.split('/')[-1]
-                    echo "🔍 Rama activa: ${env.ACTUAL_BRANCH}"
+                    // Obtener la rama objetivo (puede pasarse como parámetro o detectarse de otra forma)
+                    env.TARGET_BRANCH = params.BRANCH ?: env.BRANCH_NAME ?: 'main'
+                    
+                    // Hacer checkout del repositorio del proyecto
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: "*/${env.TARGET_BRANCH}"]],
+                        extensions: [],
+                        userRemoteConfigs: [[
+                            url: env.PROJECT_REPO,
+                            credentialsId: 'ssh-key-ec2'
+                        ]]
+                    ])
+                    
+                    // Establecer la rama actual para el despliegue
+                    env.ACTUAL_BRANCH = env.TARGET_BRANCH
+                    echo "🔍 Rama objetivo: ${env.ACTUAL_BRANCH}"
                 }
             }
         }
@@ -66,7 +82,7 @@ pipeline {
 
                         echo "📁 Configurando repositorio..."
                         if [ ! -d "$REMOTE_PATH/.git" ]; then
-                            git clone -b ${env.ACTUAL_BRANCH} https://github.com/Gallegos19/auth_service.git $REMOTE_PATH
+                            git clone -b ${env.ACTUAL_BRANCH} ${PROJECT_REPO} $REMOTE_PATH
                         fi
 
                         echo "🔁 Actualizando código..."
@@ -118,6 +134,21 @@ pipeline {
         }
         failure {
             echo "❌ Pipeline falló"
+            script {
+                // Opcional: Mostrar logs de PM2 en caso de fallo
+                def ip = env.ACTUAL_BRANCH == 'dev' ? DEV_IP :
+                         env.ACTUAL_BRANCH == 'qa'  ? QA_IP :
+                         env.ACTUAL_BRANCH == 'main' ? PROD_IP : null
+                
+                if (ip) {
+                    sh """
+                    ssh -i $SSH_KEY -o StrictHostKeyChecking=no $EC2_USER@$ip '
+                        echo "📜 Mostrando logs de PM2..."
+                        pm2 logs ${env.ACTUAL_BRANCH}-health --lines 50 || echo "No se pudieron obtener logs"
+                    '
+                    """
+                }
+            }
         }
     }
 }
